@@ -4,33 +4,32 @@ import {
   Rocket,
   Crosshair,
   ShieldAlert,
-  Play,
-  EyeOff,
   Users,
   Bot,
   BookOpen,
   ArrowLeft,
+  EyeOff,
 } from 'lucide-react';
-import { motion } from 'motion/react';
+import { motion } from 'motion/react'; // If this fails, use: import { motion } from 'framer-motion';
 
-// --- 游戏核心参数配置 ---
-const GRID_W = 12; // 总共 12 列 (索引 0-11)
-const GRID_H = 5; // 总共 5 条轨道 (索引 0-4)
-const A_MIN_X = 5; // 蓝方最小边界 (对应第 6 列)
-const A_MAX_X = 9; // 蓝方最大边界 (对应第 10 列)
+// --- Core game configuration ---
+const GRID_W = 12; // total columns (0-11)
+const GRID_H = 5; // total orbital lanes (0-4)
+const A_MIN_X = 5; // Evader min boundary (column 6)
+const A_MAX_X = 9; // Evader max boundary (column 10)
 const WIN_TIME = 2;
 const MAX_TURNS = 20;
 
-type Player = 'A' | 'B'; // A=蓝方逃逸者, B=红方追击者
+type Player = 'A' | 'B'; // A = Evader (Blue), B = Pursuer (Red)
 type Screen = 'home' | 'instructions' | 'aiRoleSelect' | 'match';
 type MatchPhase = 'playing' | 'gameover';
 type Mode = 'hotseat' | 'ai';
 
 type Pos = { x: number; y: number };
 
-// --- 纯数学魔法：计算弯曲网格的坐标 ---
+// --- Curved board layout helper ---
 const getCurvedPos = (x: number, y: number) => {
-  const dx = x - 5.5; // 以网格中心为轴
+  const dx = x - 5.5; // center axis
   const curveY = Math.pow(dx, 2) * 1.5;
   const rotate = dx * 2.5;
 
@@ -47,32 +46,32 @@ const chebyshevDist = (p1: Pos, p2: Pos) =>
 const moveDxFromOrb = (selectedY: number) => selectedY - 2;
 
 const RULES_TEXT = [
-  '双盲行动：蓝方先秘密规划，红方再规划，随后双方同时结算。',
-  '蓝方（Evader）只能在中间 5 列区域（第6~10列）活动。',
-  '红方（Pursuer）可在全图活动，并拥有 3x3 锁定区。',
-  `红方若连续 ${WIN_TIME} 回合将蓝方纳入锁定区，则红方获胜。`,
-  `蓝方若成功存活至第 ${MAX_TURNS} 回合，则蓝方获胜。`,
+  'Blind planning: the Evader plans first, then the Pursuer plans, and both moves resolve simultaneously.',
+  'The Evader (Blue) can only move within the central 5 columns (columns 6-10).',
+  'The Pursuer (Red) can move across the full map and has a 3x3 lock zone.',
+  `If the Pursuer keeps the Evader inside the lock zone for ${WIN_TIME} consecutive turns, the Pursuer wins.`,
+  `If the Evader survives until Turn ${MAX_TURNS}, the Evader wins.`,
 ];
 
 const BACKGROUND_TEXT = [
-  '本游戏抽象自“卫星追逃（Orbital Pursuit/Evasion）”问题：追击卫星尝试锁定目标卫星，而目标卫星通过机动规避追踪。',
-  '这里用离散轨道（Orb 1~5）和横向漂移（左2/左1/不动/右1/右2）来模拟轨道机动决策。',
-  '红方的 3x3 锁定区代表传感器/武器/捕获窗口；蓝方目标是利用机动与区域限制，在不利条件下坚持生存。',
-  '该模型很适合扩展为博弈论、强化学习、风险感知控制或策略搜索实验平台。',
+  'This game is inspired by the orbital pursuit-evasion problem, where a pursuing satellite attempts to lock onto a target satellite while the target performs evasive maneuvers.',
+  'Here, discrete orbital lanes (Orb 1-5) and lateral drift (left2/left1/stay/right1/right2) are used to model maneuver decisions.',
+  "The Pursuer's 3x3 lock zone represents a sensing/engagement/capture window, while the Evader aims to survive under constrained mobility.",
+  'This abstraction is suitable for extensions into game theory, reinforcement learning, risk-aware control, and strategy search.',
 ];
 
 const INITIAL_A_POS: Pos = { x: 7, y: 2 };
 const INITIAL_B_POS: Pos = { x: 1, y: 2 };
 
 export default function App() {
-  // 页面流程状态
+  // Screen flow
   const [screen, setScreen] = useState<Screen>('home');
 
-  // 对局模式状态
+  // Match mode
   const [mode, setMode] = useState<Mode | null>(null);
-  const [humanRole, setHumanRole] = useState<Player | null>(null); // AI模式下人类扮演的角色
+  const [humanRole, setHumanRole] = useState<Player | null>(null); // In AI mode: which side the human plays
 
-  // 对局运行状态（保留你原先玩法）
+  // Match runtime state
   const [matchPhase, setMatchPhase] = useState<MatchPhase>('playing');
   const [currentPlayer, setCurrentPlayer] = useState<Player>('A');
 
@@ -86,7 +85,7 @@ export default function App() {
 
   const isAIMode = mode === 'ai';
 
-  // 预计算网格坐标（提升可读性/性能）
+  // Precompute board positions
   const gridPosMap = useMemo(() => {
     const map = new Map<string, ReturnType<typeof getCurvedPos>>();
     for (let y = -1; y < GRID_H; y++) {
@@ -155,10 +154,9 @@ export default function App() {
 
     const dist = chebyshevDist(finalA, nextB);
     const newTimeInRange = dist <= 1 ? bTimeInRange + 1 : 0;
-
     setBTimeInRange(newTimeInRange);
 
-    // 胜负判定：红方优先（与你原逻辑一致）
+    // Win condition: Pursuer priority if both happen on the same turn
     if (newTimeInRange >= WIN_TIME) {
       setMatchPhase('gameover');
       setWinner('B');
@@ -180,7 +178,6 @@ export default function App() {
     if (screen !== 'match' || matchPhase !== 'playing') return;
 
     if (currentPlayer === 'A') {
-      // 防御式校验（即使按钮已禁用，也做函数内校验）
       if (!isValidMove('A', aPos.x, selectedY)) return;
 
       const nextA = calcNextPos(aPos, selectedY);
@@ -193,12 +190,11 @@ export default function App() {
     if (!isValidMove('B', bPos.x, selectedY)) return;
 
     const nextB = calcNextPos(bPos, selectedY);
-    const finalA = pendingAMove || aPos; // 理论上 pendingAMove 一定存在，这里做兜底
-
+    const finalA = pendingAMove || aPos;
     resolveTurn(finalA, nextB);
   };
 
-  // --- 简单 AI 策略 ---
+  // --- Simple AI policy ---
   const pickAIMove = (player: Player): number => {
     const validMoves =
       player === 'A' ? getValidOrbs('A', aPos.x) : getValidOrbs('B', bPos.x);
@@ -206,14 +202,14 @@ export default function App() {
     if (validMoves.length === 0) return 2;
 
     if (player === 'A') {
-      // 蓝方：尽量远离红方，同时略微偏好居中（避免被边界卡死）
+      // Evader: maximize distance, slight preference for center
       let bestScore = -Infinity;
       let best: number[] = [];
 
       for (const y of validMoves) {
         const nextA = calcNextPos(aPos, y);
         const dist = chebyshevDist(nextA, bPos);
-        const centerBias = -Math.abs(nextA.x - 7); // 越靠近中心越好（轻微）
+        const centerBias = -Math.abs(nextA.x - 7);
         const score = dist * 10 + centerBias;
 
         if (score > bestScore) {
@@ -227,7 +223,7 @@ export default function App() {
       return best[Math.floor(Math.random() * best.length)];
     }
 
-    // 红方：尽量靠近（若已知蓝方已规划动作，则追 finalA）
+    // Pursuer: minimize distance (target pending Evader move if available)
     const targetA = pendingAMove || aPos;
 
     let bestScore = -Infinity;
@@ -239,13 +235,11 @@ export default function App() {
 
       let score = -dist * 10;
 
-      // 进入锁定区大加分
       if (dist <= 1) {
         score += 120;
-        if (bTimeInRange + 1 >= WIN_TIME) score += 100; // 能直接赢则更优先
+        if (bTimeInRange + 1 >= WIN_TIME) score += 100;
       }
 
-      // 略微偏好贴近目标横向
       score += -Math.abs(nextB.x - targetA.x);
 
       if (score > bestScore) {
@@ -259,7 +253,7 @@ export default function App() {
     return best[Math.floor(Math.random() * best.length)];
   };
 
-  // --- AI 自动行动 ---
+  // --- AI auto-action ---
   useEffect(() => {
     if (screen !== 'match') return;
     if (matchPhase !== 'playing') return;
@@ -289,7 +283,6 @@ export default function App() {
     turn,
   ]);
 
-  // 当前是不是该人类操作（AI模式时会决定是否显示按钮）
   const isHumanTurn = (() => {
     if (screen !== 'match' || matchPhase !== 'playing') return false;
     if (mode === 'hotseat') return true;
@@ -299,13 +292,13 @@ export default function App() {
 
   const currentModeLabel =
     mode === 'hotseat'
-      ? '热座模式 Hotseat'
+      ? 'Hotseat Mode'
       : mode === 'ai'
-      ? `AI对战 (${humanRole === 'A' ? '你是蓝方逃逸者' : '你是红方追击者'})`
-      : '未选择模式';
+      ? 'AI Match'
+      : 'No Mode Selected';
 
   // ---------------------------
-  // 页面 1：首页（仅标题 + 三个选项）
+  // Screen 1: Home (title + three options)
   // ---------------------------
   if (screen === 'home') {
     return (
@@ -315,7 +308,6 @@ export default function App() {
           animate={{ opacity: 1, scale: 1, y: 0 }}
           className="relative w-full max-w-3xl rounded-3xl border border-slate-700/70 bg-slate-900/70 backdrop-blur-xl shadow-[0_0_60px_rgba(30,58,138,0.25)] p-8 md:p-10 overflow-hidden"
         >
-          {/* 背景光晕 */}
           <div className="absolute -bottom-24 left-1/2 -translate-x-1/2 w-[700px] h-[260px] bg-blue-500/15 blur-[70px] rounded-[100%] pointer-events-none" />
           <div className="absolute top-8 right-8 w-40 h-40 bg-red-500/10 blur-3xl rounded-full pointer-events-none" />
 
@@ -328,7 +320,7 @@ export default function App() {
               Orbital Pursuit
             </h1>
             <p className="text-slate-400 mt-2 text-sm md:text-base">
-              卫星追逃博弈 · 双盲回合制 · 轨道机动策略游戏
+              Satellite Pursuit-Evasion · Blind Turn-Based Strategy Game
             </p>
           </div>
 
@@ -339,10 +331,10 @@ export default function App() {
             >
               <div className="flex items-center gap-3 mb-3">
                 <Users className="text-cyan-300" size={22} />
-                <span className="text-white font-bold text-lg">热座模式</span>
+                <span className="text-white font-bold text-lg">Hotseat Mode</span>
               </div>
               <p className="text-slate-400 text-sm leading-relaxed">
-                两名玩家本地轮流操作，保持双盲规划，再同时结算动作。
+                Two local players take turns planning moves, then resolve simultaneously.
               </p>
             </button>
 
@@ -352,10 +344,10 @@ export default function App() {
             >
               <div className="flex items-center gap-3 mb-3">
                 <Bot className="text-violet-300" size={22} />
-                <span className="text-white font-bold text-lg">AI对战</span>
+                <span className="text-white font-bold text-lg">AI Match</span>
               </div>
               <p className="text-slate-400 text-sm leading-relaxed">
-                选择扮演红方追击者或蓝方逃逸者，与 AI 进行策略对局。
+                Choose to play as the Pursuer or Evader and compete against an AI opponent.
               </p>
             </button>
 
@@ -365,10 +357,10 @@ export default function App() {
             >
               <div className="flex items-center gap-3 mb-3">
                 <BookOpen className="text-amber-300" size={22} />
-                <span className="text-white font-bold text-lg">说明</span>
+                <span className="text-white font-bold text-lg">Instructions</span>
               </div>
               <p className="text-slate-400 text-sm leading-relaxed">
-                查看游戏规则、胜负条件，以及“卫星追逃问题”的背景介绍。
+                View game rules, win conditions, and the orbital pursuit-evasion background.
               </p>
             </button>
           </div>
@@ -378,7 +370,7 @@ export default function App() {
   }
 
   // ---------------------------
-  // 页面 2：说明页（规则 + 背景）
+  // Screen 2: Instructions
   // ---------------------------
   if (screen === 'instructions') {
     return (
@@ -390,12 +382,12 @@ export default function App() {
               className="inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-slate-700 bg-slate-900/70 hover:bg-slate-800/80 transition"
             >
               <ArrowLeft size={18} />
-              返回首页
+              Back to Home
             </button>
 
             <div className="text-right">
-              <h2 className="text-2xl md:text-3xl font-bold text-white">说明</h2>
-              <p className="text-slate-400 text-sm">规则 & 背景介绍</p>
+              <h2 className="text-2xl md:text-3xl font-bold text-white">Instructions</h2>
+              <p className="text-slate-400 text-sm">Rules & Background</p>
             </div>
           </div>
 
@@ -407,7 +399,7 @@ export default function App() {
             >
               <div className="flex items-center gap-3 mb-4">
                 <BookOpen className="text-cyan-300" size={22} />
-                <h3 className="text-xl font-bold text-white">游戏规则</h3>
+                <h3 className="text-xl font-bold text-white">Game Rules</h3>
               </div>
 
               <div className="space-y-3 text-slate-300 text-sm leading-7">
@@ -420,11 +412,12 @@ export default function App() {
               </div>
 
               <div className="mt-5 p-4 rounded-xl border border-slate-800 bg-slate-950/50 text-sm text-slate-400 leading-6">
-                <p className="mb-1 text-slate-300 font-semibold">动作解释</p>
+                <p className="mb-1 text-slate-300 font-semibold">Move Mapping</p>
                 <p>
-                  选择轨道 <span className="font-mono text-slate-200">Orb y</span> 后，
-                  横向位移为 <span className="font-mono text-slate-200">dx = y - 2</span>：
-                  即 <span className="font-mono">←2, ←1, Stay, →1, →2</span>。
+                  Choosing <span className="font-mono text-slate-200">Orb y</span> sets the next lane,
+                  and the lateral shift is{' '}
+                  <span className="font-mono text-slate-200">dx = y - 2</span>:{" "}
+                  <span className="font-mono">←2, ←1, Stay, →1, →2</span>.
                 </p>
               </div>
             </motion.div>
@@ -436,7 +429,7 @@ export default function App() {
             >
               <div className="flex items-center gap-3 mb-4">
                 <Satellite className="text-blue-300" size={22} />
-                <h3 className="text-xl font-bold text-white">游戏背景：卫星追逃问题</h3>
+                <h3 className="text-xl font-bold text-white">Background: Orbital Pursuit-Evasion</h3>
               </div>
 
               <div className="space-y-3 text-slate-300 text-sm leading-7">
@@ -449,10 +442,13 @@ export default function App() {
               </div>
 
               <div className="mt-5 p-4 rounded-xl border border-slate-800 bg-slate-950/50 text-sm text-slate-400 leading-6">
-                <p className="text-slate-300 font-semibold mb-1">为什么这个题材有意思？</p>
+                <p className="text-slate-300 font-semibold mb-1">Why this problem is interesting</p>
                 <p>
-                  因为它天然包含 <span className="text-slate-200">对抗、信息不完全、风险管理、预测与反预测</span>，
-                  很适合做博弈策略和 AI 实验。
+                  It naturally involves{' '}
+                  <span className="text-slate-200">
+                    adversarial planning, incomplete information, risk management, prediction, and deception
+                  </span>
+                  , making it a strong testbed for strategy and AI experiments.
                 </p>
               </div>
             </motion.div>
@@ -463,7 +459,7 @@ export default function App() {
   }
 
   // ---------------------------
-  // 页面 3：AI 角色选择页
+  // Screen 3: AI role selection
   // ---------------------------
   if (screen === 'aiRoleSelect') {
     return (
@@ -479,17 +475,17 @@ export default function App() {
               className="inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-slate-700 bg-slate-900/70 hover:bg-slate-800/80 transition"
             >
               <ArrowLeft size={18} />
-              返回首页
+              Back to Home
             </button>
 
             <div className="text-right">
-              <h2 className="text-2xl font-bold text-white">AI 对战</h2>
-              <p className="text-slate-400 text-sm">请选择你要扮演的阵营</p>
+              <h2 className="text-2xl font-bold text-white">AI Match</h2>
+              <p className="text-slate-400 text-sm">Choose your side</p>
             </div>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-            {/* 红方追击者 */}
+            {/* Pursuer */}
             <button
               onClick={() => startAIMatch('B')}
               className="group text-left rounded-2xl border border-red-900/40 bg-red-950/20 hover:bg-red-950/35 p-6 transition-all hover:-translate-y-1"
@@ -499,22 +495,22 @@ export default function App() {
                   <Rocket className="text-red-400" size={28} />
                 </div>
                 <div>
-                  <div className="text-white font-bold text-xl">追击者（红方）</div>
-                  <div className="text-red-200/80 text-sm">Pursuer</div>
+                  <div className="text-white font-bold text-xl">Pursuer (Red)</div>
+                  <div className="text-red-200/80 text-sm">Lock and intercept</div>
                 </div>
               </div>
 
               <p className="text-slate-300 text-sm leading-6">
-                你的目标是利用 3x3 锁定区追踪并压制蓝方，
-                让其连续 <span className="font-mono text-white">{WIN_TIME}</span> 回合处于锁定范围内。
+                Keep the Evader inside your 3x3 lock zone for{' '}
+                <span className="font-mono text-white">{WIN_TIME}</span> consecutive turns to win.
               </p>
 
               <div className="mt-4 text-xs text-red-200/80 font-mono">
-                适合喜欢主动压迫、预测走位的玩家
+                Aggressive / predictive playstyle
               </div>
             </button>
 
-            {/* 蓝方逃逸者 */}
+            {/* Evader */}
             <button
               onClick={() => startAIMatch('A')}
               className="group text-left rounded-2xl border border-blue-900/40 bg-blue-950/20 hover:bg-blue-950/35 p-6 transition-all hover:-translate-y-1"
@@ -524,18 +520,18 @@ export default function App() {
                   <Satellite className="text-blue-400" size={28} />
                 </div>
                 <div>
-                  <div className="text-white font-bold text-xl">逃逸者（蓝方）</div>
-                  <div className="text-blue-200/80 text-sm">Evader</div>
+                  <div className="text-white font-bold text-xl">Evader (Blue)</div>
+                  <div className="text-blue-200/80 text-sm">Survive and evade</div>
                 </div>
               </div>
 
               <p className="text-slate-300 text-sm leading-6">
-                你的目标是在中间受限区域内持续规避红方锁定，
-                成功坚持至 <span className="font-mono text-white">第 {MAX_TURNS} 回合</span> 即可获胜。
+                Survive within the restricted central zone until{' '}
+                <span className="font-mono text-white">Turn {MAX_TURNS}</span> to win.
               </p>
 
               <div className="mt-4 text-xs text-blue-200/80 font-mono">
-                适合喜欢规避、骗招与空间管理的玩家
+                Evasion / spacing management playstyle
               </div>
             </button>
           </div>
@@ -545,12 +541,12 @@ export default function App() {
   }
 
   // ---------------------------
-  // 页面 4：正式对局页（左规则 / 中棋盘 / 右背景）
+  // Screen 4: Match view (left rules / center board / right background)
   // ---------------------------
   return (
     <div className="min-h-screen bg-[radial-gradient(ellipse_at_bottom,_var(--tw-gradient-stops))] from-blue-950 via-slate-950 to-black text-slate-200 font-sans py-6 px-3 md:px-4 overflow-x-hidden">
       <div className="max-w-[1600px] mx-auto">
-        {/* 顶部栏 */}
+        {/* Top bar */}
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between mb-5">
           <div>
             <h1 className="text-2xl md:text-3xl font-bold tracking-tight text-white drop-shadow-lg">
@@ -560,35 +556,23 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
-            {mode === 'ai' && humanRole && (
-              <span
-                className={`px-3 py-1 rounded-full text-xs border ${
-                  humanRole === 'A'
-                    ? 'bg-blue-950/70 border-blue-800 text-blue-200'
-                    : 'bg-red-950/70 border-red-800 text-red-200'
-                }`}
-              >
-                你扮演：{humanRole === 'A' ? '蓝方逃逸者' : '红方追击者'}
-              </span>
-            )}
-
             <button
               onClick={backToMenuFromMatch}
               className="px-4 py-2 rounded-xl border border-slate-700 bg-slate-900/70 hover:bg-slate-800 transition text-sm"
             >
-              返回首页
+              Back to Home
             </button>
           </div>
         </div>
 
-        {/* 主布局：左规则 / 中游戏 / 右背景 */}
+        {/* Main layout */}
         <div className="flex flex-col xl:flex-row gap-5 items-start justify-center">
-          {/* 左侧：规则（桌面左侧，小屏移到下方也可以） */}
+          {/* Left panel: Rules */}
           <aside className="w-full xl:w-[280px] order-2 xl:order-1">
             <div className="rounded-2xl border border-slate-700/60 bg-slate-900/60 backdrop-blur-xl p-5 sticky top-4">
               <div className="flex items-center gap-2 mb-3">
                 <BookOpen size={18} className="text-cyan-300" />
-                <h3 className="font-bold text-white">游戏规则</h3>
+                <h3 className="font-bold text-white">Game Rules</h3>
               </div>
 
               <div className="space-y-2 text-sm text-slate-300 leading-6">
@@ -601,13 +585,13 @@ export default function App() {
               </div>
 
               <div className="mt-4 p-3 rounded-xl border border-slate-800 bg-slate-950/50 text-xs text-slate-400 leading-5">
-                <p className="text-slate-300 font-semibold mb-1">操作提示</p>
-                <p>选择 Orb 1~5 表示下一步轨道，同时决定横向漂移量（dx = y - 2）。</p>
+                <p className="text-slate-300 font-semibold mb-1">Controls</p>
+                <p>Select Orb 1-5 to choose the next lane and lateral drift (dx = y - 2).</p>
               </div>
             </div>
           </aside>
 
-          {/* 中间：游戏主体 */}
+          {/* Center: Game */}
           <main className="w-full xl:w-auto order-1 xl:order-2 flex flex-col items-center">
             {/* Status Dashboard */}
             <div className="flex flex-wrap justify-center gap-4 md:gap-8 mb-5 bg-slate-900/60 backdrop-blur-md p-4 rounded-2xl border border-slate-800/60 shadow-xl z-20">
@@ -655,18 +639,17 @@ export default function App() {
                     currentPlayer === 'A' ? 'text-blue-300' : 'text-red-300'
                   }`}
                 >
-                  {currentPlayer === 'A' ? '蓝方规划中' : '红方规划中'}
+                  {currentPlayer === 'A' ? 'Evader Planning' : 'Pursuer Planning'}
                 </span>
               </div>
             </div>
 
-            {/* 弯曲棋盘 - 加上横向滚动容器，防止小屏溢出 */}
+            {/* Curved board */}
             <div className="w-full overflow-x-auto pb-1">
               <div className="relative w-[760px] h-[460px] bg-slate-900/30 backdrop-blur-xl rounded-[2.5rem] border border-slate-700/50 shadow-2xl overflow-hidden shrink-0 mx-auto">
-                {/* 底部光晕 */}
                 <div className="absolute bottom-[-100px] left-1/2 -translate-x-1/2 w-[800px] h-[250px] bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-blue-600/20 via-blue-900/10 to-transparent blur-2xl rounded-t-[100%] pointer-events-none z-0" />
 
-                {/* 列标签 1-12 */}
+                {/* Column labels */}
                 {Array.from({ length: GRID_W }).map((_, x) => {
                   const pos = posOf(x, -0.8);
                   return (
@@ -680,7 +663,7 @@ export default function App() {
                   );
                 })}
 
-                {/* 轨道标签 */}
+                {/* Lane labels */}
                 {Array.from({ length: GRID_H }).map((_, y) => {
                   const pos = posOf(-1, y);
                   return (
@@ -698,7 +681,7 @@ export default function App() {
                   );
                 })}
 
-                {/* 渲染弯曲网格 */}
+                {/* Grid cells */}
                 {Array.from({ length: GRID_H }).map((_, y) =>
                   Array.from({ length: GRID_W }).map((_, x) => {
                     const pos = posOf(x, y);
@@ -724,7 +707,7 @@ export default function App() {
                   })
                 )}
 
-                {/* 蓝方卫星 A */}
+                {/* Evader A */}
                 <motion.div
                   className="absolute w-11 h-11 flex items-center justify-center text-blue-400 z-30 drop-shadow-[0_0_10px_rgba(96,165,250,1)]"
                   initial={false}
@@ -738,7 +721,7 @@ export default function App() {
                   <Satellite size={26} strokeWidth={1.5} />
                 </motion.div>
 
-                {/* 红方追击者 B */}
+                {/* Pursuer B */}
                 <motion.div
                   className="absolute w-11 h-11 flex items-center justify-center text-red-400 z-40 drop-shadow-[0_0_10px_rgba(248,113,113,1)]"
                   initial={false}
@@ -754,7 +737,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* Controls Panel / AI等待面板 / Game Over */}
+            {/* Controls / Waiting / Game Over */}
             {matchPhase === 'playing' ? (
               isHumanTurn ? (
                 <div
@@ -769,11 +752,11 @@ export default function App() {
                       <>
                         <Satellite size={24} className="text-blue-400" />
                         <h3 className="text-xl font-bold text-blue-400 flex items-center gap-2 flex-wrap justify-center">
-                          {mode === 'hotseat' ? 'Evader (Blue) - 规划动作' : '你（蓝方）- 规划动作'}
+                          Evader (Blue) - Plan Move
                           {mode === 'hotseat' && (
                             <span className="text-sm font-normal text-blue-300/60 ml-1 border border-blue-800/50 bg-blue-950 px-2 py-0.5 rounded-full flex items-center gap-1">
                               <EyeOff size={14} />
-                              红方请回避视线
+                              Red player look away
                             </span>
                           )}
                         </h3>
@@ -782,11 +765,11 @@ export default function App() {
                       <>
                         <Rocket size={24} className="text-red-400" />
                         <h3 className="text-xl font-bold text-red-400 flex items-center gap-2 flex-wrap justify-center">
-                          {mode === 'hotseat' ? 'Pursuer (Red) - 规划动作' : '你（红方）- 规划动作'}
+                          Pursuer (Red) - Plan Move
                           {mode === 'hotseat' && (
                             <span className="text-sm font-normal text-red-300/60 ml-1 border border-red-800/50 bg-red-950 px-2 py-0.5 rounded-full flex items-center gap-1">
                               <EyeOff size={14} />
-                              蓝方动作已锁定
+                              Blue move locked
                             </span>
                           )}
                         </h3>
@@ -847,13 +830,9 @@ export default function App() {
                       <Rocket className="text-red-400" />
                     )}
                     <div className="text-center">
-                      <p className="text-white font-semibold">
-                        AI 正在为{currentPlayer === 'A' ? '蓝方（逃逸者）' : '红方（追击者）'}规划动作…
-                      </p>
+                      <p className="text-white font-semibold">Opponent is planning...</p>
                       <p className="text-slate-400 text-sm mt-1">
-                        {currentPlayer === 'A'
-                          ? 'AI 将先锁定蓝方动作，再轮到你操作红方。'
-                          : 'AI 正在基于当前位置进行追击决策。'}
+                        Please wait for the move to resolve.
                       </p>
                     </div>
                   </div>
@@ -885,13 +864,15 @@ export default function App() {
                     winner === 'B' ? 'text-red-400' : 'text-blue-400'
                   }`}
                 >
-                  {winner === 'B' ? 'TARGET LOCKED (红方获胜)' : 'EVADER ESCAPED (蓝方获胜)'}
+                  {winner === 'B'
+                    ? 'TARGET LOCKED (Pursuer Wins)'
+                    : 'EVADER ESCAPED (Evader Wins)'}
                 </h2>
 
                 <p className="text-slate-400 text-sm">
                   {winner === 'B'
-                    ? '红方成功完成连续锁定。'
-                    : `蓝方成功存活至第 ${MAX_TURNS} 回合。`}
+                    ? 'The Pursuer achieved a sustained lock.'
+                    : `The Evader survived until Turn ${MAX_TURNS}.`}
                 </p>
 
                 <div className="mt-6 flex flex-col sm:flex-row justify-center gap-3">
@@ -905,26 +886,26 @@ export default function App() {
                     }}
                     className="px-6 py-3 bg-white text-slate-900 font-bold rounded-xl hover:bg-blue-100 transition-all active:scale-95"
                   >
-                    再来一局
+                    Play Again
                   </button>
 
                   <button
                     onClick={backToMenuFromMatch}
                     className="px-6 py-3 border border-slate-700 bg-slate-900/70 text-white font-semibold rounded-xl hover:bg-slate-800 transition-all"
                   >
-                    返回首页
+                    Back to Home
                   </button>
                 </div>
               </motion.div>
             )}
           </main>
 
-          {/* 右侧：背景（桌面右侧） */}
+          {/* Right panel: Background */}
           <aside className="w-full xl:w-[280px] order-3">
             <div className="rounded-2xl border border-slate-700/60 bg-slate-900/60 backdrop-blur-xl p-5 sticky top-4">
               <div className="flex items-center gap-2 mb-3">
                 <Satellite size={18} className="text-blue-300" />
-                <h3 className="font-bold text-white">背景描述</h3>
+                <h3 className="font-bold text-white">Background</h3>
               </div>
 
               <div className="space-y-2 text-sm text-slate-300 leading-6">
@@ -934,8 +915,10 @@ export default function App() {
               </div>
 
               <div className="mt-4 p-3 rounded-xl border border-slate-800 bg-slate-950/50 text-xs text-slate-400 leading-5">
-                <p className="text-slate-300 font-semibold mb-1">可扩展方向</p>
-                <p>后续可以加入：更强 AI、回合日志、历史回放、难度等级、概率扰动、RL 模式等。</p>
+                <p className="text-slate-300 font-semibold mb-1">Possible Extensions</p>
+                <p>
+                  Stronger AI, turn logs, replay, difficulty levels, stochastic disturbances, RL mode, etc.
+                </p>
               </div>
             </div>
           </aside>
