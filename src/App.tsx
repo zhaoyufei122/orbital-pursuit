@@ -9,6 +9,10 @@ import {
   BookOpen,
   ArrowLeft,
   EyeOff,
+  Radar,
+  AlertTriangle,
+  Eye,
+  EyeOff as EyeOffIcon,
 } from 'lucide-react';
 import { motion } from 'motion/react'; // If this fails, use: import { motion } from 'framer-motion';
 
@@ -26,6 +30,7 @@ type MatchPhase = 'playing' | 'gameover';
 type Mode = 'hotseat' | 'ai';
 
 type Pos = { x: number; y: number };
+type BluePolicyMap = Record<string, number>; // key: "ax,ay,bx,by,lock,turn" -> actionY (0..4)
 
 // --- Curved board layout helper ---
 const getCurvedPos = (x: number, y: number) => {
@@ -45,18 +50,32 @@ const chebyshevDist = (p1: Pos, p2: Pos) =>
 
 const moveDxFromOrb = (selectedY: number) => selectedY - 2;
 
+// Displayed orbit label (top -> bottom: 2, 1, 0, -1, -2)
+const orbitValueFromY = (y: number) => 2 - y;
+
+// IMPORTANT: must match Python export key order exactly: ax,ay,bx,by,lock,turn
+const makeBluePolicyKey = (a: Pos, b: Pos, lockStreak: number, currentTurn: number) =>
+  `${a.x},${a.y},${b.x},${b.y},${lockStreak},${currentTurn}`;
+
+// Observation rule: every 4 turns -> first 2 visible, next 2 hidden
+// Turn 1,2 visible; 3,4 hidden; 5,6 visible; 7,8 hidden; ...
+const redHasVisionThisTurn = (turn: number) => ((turn - 1) % 4) < 2;
+
 const RULES_TEXT = [
   'Blind planning: the Evader plans first, then the Pursuer plans, and both moves resolve simultaneously.',
   'The Evader (Blue) can only move within the central 5 columns (columns 6-10).',
   'The Pursuer (Red) can move across the full map and has a 3x3 lock zone.',
+  'Sensor cycle (repeats every 4 turns): the Pursuer can directly observe the Evader on the first 2 turns, then loses direct observation for the next 2 turns.',
+  'During hidden turns, if the Evader is inside the Pursuer’s lock zone, the Pursuer only receives a contact alert (position remains unknown).',
   `If the Pursuer keeps the Evader inside the lock zone for ${WIN_TIME} consecutive turns, the Pursuer wins.`,
   `If the Evader survives until Turn ${MAX_TURNS}, the Evader wins.`,
 ];
 
 const BACKGROUND_TEXT = [
   'This game is inspired by the orbital pursuit-evasion problem, where a pursuing satellite attempts to lock onto a target satellite while the target performs evasive maneuvers.',
-  'Here, discrete orbital lanes (Orb 1-5) and lateral drift (left2/left1/stay/right1/right2) are used to model maneuver decisions.',
+  'Here, discrete orbital lanes (2, 1, 0, -1, -2 from top to bottom) and lateral drift (left2/left1/stay/right1/right2) are used to model maneuver decisions.',
   "The Pursuer's 3x3 lock zone represents a sensing/engagement/capture window, while the Evader aims to survive under constrained mobility.",
+  'A periodic observation window models ground-based sensing + communication delay: tracking is sometimes accurate, sometimes memory-based.',
   'This abstraction is suitable for extensions into game theory, reinforcement learning, risk-aware control, and strategy search.',
 ];
 
@@ -71,6 +90,9 @@ export default function App() {
   const [mode, setMode] = useState<Mode | null>(null);
   const [humanRole, setHumanRole] = useState<Player | null>(null); // In AI mode: which side the human plays
 
+  // Loaded Q-learning policy for BLUE (Evader)
+  const [bluePolicy, setBluePolicy] = useState<BluePolicyMap | null>(null);
+
   // Match runtime state
   const [matchPhase, setMatchPhase] = useState<MatchPhase>('playing');
   const [currentPlayer, setCurrentPlayer] = useState<Player>('A');
@@ -78,12 +100,46 @@ export default function App() {
   const [aPos, setAPos] = useState<Pos>(INITIAL_A_POS);
   const [bPos, setBPos] = useState<Pos>(INITIAL_B_POS);
 
+  // Red's last observed exact position of Blue (used during hidden turns)
+  const [redObservedA, setRedObservedA] = useState<Pos>(INITIAL_A_POS);
+
   const [pendingAMove, setPendingAMove] = useState<Pos | null>(null);
   const [turn, setTurn] = useState(1);
   const [bTimeInRange, setBTimeInRange] = useState(0);
   const [winner, setWinner] = useState<Player | null>(null);
 
+  // Hotseat screen-protector gate (prevents next player from seeing a flash)
+  const [hotseatHandoff, setHotseatHandoff] = useState<{ nextPlayer: Player; nextTurn: number } | null>(null);
+
   const isAIMode = mode === 'ai';
+
+  // Load blue Q-learning policy from public/
+  // Put file at: public/blue_policy_qlearning_fair_red.json
+  useEffect(() => {
+    let cancelled = false;
+
+    fetch('/blue_policy_qlearning_fair_red.json')
+      .then((res) => {
+        if (!res.ok) {
+          throw new Error(`Failed to load policy JSON (status ${res.status})`);
+        }
+        return res.json();
+      })
+      .then((data: BluePolicyMap) => {
+        if (cancelled) return;
+        setBluePolicy(data);
+        console.log('[Blue Policy] Loaded states:', Object.keys(data).length);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setBluePolicy(null);
+        console.warn('[Blue Policy] Load failed. Using heuristic fallback only.', err);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Precompute board positions
   const gridPosMap = useMemo(() => {
@@ -118,12 +174,14 @@ export default function App() {
   const resetMatchCore = () => {
     setAPos(INITIAL_A_POS);
     setBPos(INITIAL_B_POS);
+    setRedObservedA(INITIAL_A_POS);
     setTurn(1);
     setBTimeInRange(0);
     setWinner(null);
     setCurrentPlayer('A');
     setPendingAMove(null);
     setMatchPhase('playing');
+    setHotseatHandoff(null);
   };
 
   const startHotseat = () => {
@@ -142,11 +200,25 @@ export default function App() {
 
   const backToHome = () => {
     setScreen('home');
+    setHotseatHandoff(null);
   };
 
   const backToMenuFromMatch = () => {
     setScreen('home');
+    setHotseatHandoff(null);
   };
+
+  // Derived sensor / observation state for the current turn
+  const redVisionNow = redHasVisionThisTurn(turn);
+  const hiddenContactSignal = !redVisionNow && chebyshevDist(aPos, bPos) <= 1;
+
+  // Update red's observed Blue position whenever the sensor window is visible
+  useEffect(() => {
+    if (screen !== 'match') return;
+    if (matchPhase !== 'playing') return;
+    if (!redVisionNow) return;
+    setRedObservedA(aPos);
+  }, [screen, matchPhase, redVisionNow, aPos]);
 
   const resolveTurn = (finalA: Pos, nextB: Pos) => {
     setAPos(finalA);
@@ -160,22 +232,38 @@ export default function App() {
     if (newTimeInRange >= WIN_TIME) {
       setMatchPhase('gameover');
       setWinner('B');
+      setHotseatHandoff(null);
       return;
     }
 
     if (turn >= MAX_TURNS) {
       setMatchPhase('gameover');
       setWinner('A');
+      setHotseatHandoff(null);
       return;
     }
 
-    setTurn((t) => t + 1);
-    setCurrentPlayer('A');
-    setPendingAMove(null);
+const nextTurn = turn + 1;
+const finishedTurnWasHidden = !redHasVisionThisTurn(turn);
+
+setTurn(nextTurn);
+setCurrentPlayer('A');
+setPendingAMove(null);
+
+// Hotseat screen protector is needed when the JUST-FINISHED turn was hidden.
+// This prevents revealing the result of a hidden-turn move during the handoff.
+if (mode === 'hotseat' && finishedTurnWasHidden) {
+  setHotseatHandoff({ nextPlayer: 'A', nextTurn });
+} else {
+  setHotseatHandoff(null);
+}
   };
 
   const handlePlayerMove = (selectedY: number) => {
     if (screen !== 'match' || matchPhase !== 'playing') return;
+
+    // Prevent actions while hotseat handoff overlay is active
+    if (mode === 'hotseat' && hotseatHandoff) return;
 
     if (currentPlayer === 'A') {
       if (!isValidMove('A', aPos.x, selectedY)) return;
@@ -194,7 +282,7 @@ export default function App() {
     resolveTurn(finalA, nextB);
   };
 
-  // --- Simple AI policy ---
+  // --- Simple AI policy (with Blue Q-learning lookup + Red partial observability) ---
   const pickAIMove = (player: Player): number => {
     const validMoves =
       player === 'A' ? getValidOrbs('A', aPos.x) : getValidOrbs('B', bPos.x);
@@ -202,14 +290,27 @@ export default function App() {
     if (validMoves.length === 0) return 2;
 
     if (player === 'A') {
-      // Evader: maximize distance, slight preference for center
+      // 1) Try Q-learning policy lookup first (Blue / Evader)
+      if (bluePolicy) {
+        const key = makeBluePolicyKey(aPos, bPos, bTimeInRange, turn);
+        const actionFromPolicy = bluePolicy[key];
+
+        if (
+          actionFromPolicy !== undefined &&
+          isValidMove('A', aPos.x, actionFromPolicy)
+        ) {
+          return actionFromPolicy;
+        }
+      }
+
+      // 2) Fallback heuristic: maximize distance + slight center preference
       let bestScore = -Infinity;
       let best: number[] = [];
 
       for (const y of validMoves) {
         const nextA = calcNextPos(aPos, y);
         const dist = chebyshevDist(nextA, bPos);
-        const centerBias = -Math.abs(nextA.x - 7);
+        const centerBias = -Math.abs(nextA.x - 7); // mild preference for center
         const score = dist * 10 + centerBias;
 
         if (score > bestScore) {
@@ -223,24 +324,29 @@ export default function App() {
       return best[Math.floor(Math.random() * best.length)];
     }
 
-    // Pursuer: minimize distance (target pending Evader move if available)
-    const targetA = pendingAMove || aPos;
+    // Pursuer (Red): partial observability
+    const targetA = redVisionNow ? aPos : redObservedA;
 
     let bestScore = -Infinity;
     let best: number[] = [];
 
     for (const y of validMoves) {
       const nextB = calcNextPos(bPos, y);
-      const dist = chebyshevDist(targetA, nextB);
+      const distToTarget = chebyshevDist(targetA, nextB);
 
-      let score = -dist * 10;
+      let score = -distToTarget * 10;
+      score += -Math.abs(nextB.x - targetA.x);
 
-      if (dist <= 1) {
+      if (distToTarget <= 1) {
         score += 120;
         if (bTimeInRange + 1 >= WIN_TIME) score += 100;
       }
 
-      score += -Math.abs(nextB.x - targetA.x);
+      // Hidden-turn contact alert: Red knows "target is close now" but not exact location.
+      if (!redVisionNow && hiddenContactSignal) {
+        const localContainment = -chebyshevDist(nextB, bPos);
+        score += 25 + localContainment * 4;
+      }
 
       if (score > bestScore) {
         bestScore = score;
@@ -259,6 +365,7 @@ export default function App() {
     if (matchPhase !== 'playing') return;
     if (!isAIMode) return;
     if (!humanRole) return;
+    if (hotseatHandoff) return;
 
     const aiRole: Player = humanRole === 'A' ? 'B' : 'A';
     if (currentPlayer !== aiRole) return;
@@ -278,9 +385,14 @@ export default function App() {
     currentPlayer,
     aPos,
     bPos,
+    redObservedA,
     pendingAMove,
     bTimeInRange,
     turn,
+    bluePolicy,
+    redVisionNow,
+    hiddenContactSignal,
+    hotseatHandoff,
   ]);
 
   const isHumanTurn = (() => {
@@ -296,6 +408,19 @@ export default function App() {
       : mode === 'ai'
       ? 'AI Match'
       : 'No Mode Selected';
+
+  // Viewer-perspective visibility control for the Blue piece
+  // Goal:
+  // - Hotseat: hide Blue only when it is Red player's planning turn in a hidden window
+  // - AI mode (human plays Red): hide Blue during the entire hidden window
+  //   (including Blue move animation / resolution) to avoid information leakage
+  const shouldHideBlueFromViewer =
+    matchPhase === 'playing' &&
+    !redVisionNow &&
+    ((mode === 'hotseat' && currentPlayer === 'B') ||
+      (mode === 'ai' && humanRole === 'B'));
+
+  const showActualBluePiece = !shouldHideBlueFromViewer;
 
   // ---------------------------
   // Screen 1: Home (title + three options)
@@ -360,7 +485,7 @@ export default function App() {
                 <span className="text-white font-bold text-lg">Instructions</span>
               </div>
               <p className="text-slate-400 text-sm leading-relaxed">
-                View game rules, win conditions, and the orbital pursuit-evasion background.
+                View rules, sensor window behavior, and the orbital pursuit-evasion background.
               </p>
             </button>
           </div>
@@ -387,7 +512,7 @@ export default function App() {
 
             <div className="text-right">
               <h2 className="text-2xl md:text-3xl font-bold text-white">Instructions</h2>
-              <p className="text-slate-400 text-sm">Rules & Background</p>
+              <p className="text-slate-400 text-sm">Rules, Sensor Cycle & Background</p>
             </div>
           </div>
 
@@ -414,9 +539,10 @@ export default function App() {
               <div className="mt-5 p-4 rounded-xl border border-slate-800 bg-slate-950/50 text-sm text-slate-400 leading-6">
                 <p className="mb-1 text-slate-300 font-semibold">Move Mapping</p>
                 <p>
-                  Choosing <span className="font-mono text-slate-200">Orb y</span> sets the next lane,
-                  and the lateral shift is{' '}
-                  <span className="font-mono text-slate-200">dx = y - 2</span>:{" "}
+                  Choose an orbit lane from{' '}
+                  <span className="font-mono text-slate-200">2, 1, 0, -1, -2</span> (top to bottom).
+                  The lateral shift still uses{' '}
+                  <span className="font-mono text-slate-200">dx = y - 2</span>:{' '}
                   <span className="font-mono">←2, ←1, Stay, →1, →2</span>.
                 </p>
               </div>
@@ -446,7 +572,7 @@ export default function App() {
                 <p>
                   It naturally involves{' '}
                   <span className="text-slate-200">
-                    adversarial planning, incomplete information, risk management, prediction, and deception
+                    adversarial planning, incomplete information, sensor scheduling, risk management, prediction, and deception
                   </span>
                   , making it a strong testbed for strategy and AI experiments.
                 </p>
@@ -501,12 +627,12 @@ export default function App() {
               </div>
 
               <p className="text-slate-300 text-sm leading-6">
-                Keep the Evader inside your 3x3 lock zone for{' '}
-                <span className="font-mono text-white">{WIN_TIME}</span> consecutive turns to win.
+                Track the Evader across alternating visibility windows and maintain lock for{' '}
+                <span className="font-mono text-white">{WIN_TIME}</span> consecutive turns.
               </p>
 
               <div className="mt-4 text-xs text-red-200/80 font-mono">
-                Aggressive / predictive playstyle
+                Sensor-limited / predictive playstyle
               </div>
             </button>
 
@@ -526,12 +652,12 @@ export default function App() {
               </div>
 
               <p className="text-slate-300 text-sm leading-6">
-                Survive within the restricted central zone until{' '}
-                <span className="font-mono text-white">Turn {MAX_TURNS}</span> to win.
+                Exploit the hidden observation window (2 visible / 2 hidden) and survive until{' '}
+                <span className="font-mono text-white">Turn {MAX_TURNS}</span>.
               </p>
 
               <div className="mt-4 text-xs text-blue-200/80 font-mono">
-                Evasion / spacing management playstyle
+                Deception / spacing management playstyle
               </div>
             </button>
           </div>
@@ -586,7 +712,7 @@ export default function App() {
 
               <div className="mt-4 p-3 rounded-xl border border-slate-800 bg-slate-950/50 text-xs text-slate-400 leading-5">
                 <p className="text-slate-300 font-semibold mb-1">Controls</p>
-                <p>Select Orb 1-5 to choose the next lane and lateral drift (dx = y - 2).</p>
+                <p>Choose one lane value (2, 1, 0, -1, -2) to set the next orbit row and drift.</p>
               </div>
             </div>
           </aside>
@@ -632,6 +758,25 @@ export default function App() {
 
               <div className="flex flex-col items-center px-4">
                 <span className="text-slate-500 text-xs font-bold uppercase tracking-widest mb-1">
+                  Red Sensor
+                </span>
+                <span
+                  className={`text-sm font-semibold flex items-center gap-1 ${
+                    redVisionNow ? 'text-emerald-300' : 'text-amber-300'
+                  }`}
+                >
+                  {redVisionNow ? <Eye size={14} /> : <EyeOffIcon size={14} />}
+                  {redVisionNow ? 'Visible Window' : 'Hidden Window'}
+                </span>
+                <span className="text-[11px] text-slate-500 mt-1 font-mono">
+                  Cycle {((turn - 1) % 4) + 1}/4
+                </span>
+              </div>
+
+              <div className="hidden md:block w-px bg-slate-800"></div>
+
+              <div className="flex flex-col items-center px-4">
+                <span className="text-slate-500 text-xs font-bold uppercase tracking-widest mb-1">
                   Current
                 </span>
                 <span
@@ -643,6 +788,23 @@ export default function App() {
                 </span>
               </div>
             </div>
+
+            {/* Contact alert banner (only when red-view hidden phase is actually active to avoid leaking info) */}
+            {shouldHideBlueFromViewer && hiddenContactSignal && (
+              <motion.div
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="mb-4 w-full max-w-2xl rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-amber-100 shadow-lg"
+              >
+                <div className="flex items-center gap-2 text-sm">
+                  <AlertTriangle size={16} className="text-amber-300" />
+                  <span className="font-semibold">Contact Alert:</span>
+                  <span>
+                    Target is inside the lock zone (position unknown during hidden window).
+                  </span>
+                </div>
+              </motion.div>
+            )}
 
             {/* Curved board */}
             <div className="w-full overflow-x-auto pb-1">
@@ -663,7 +825,7 @@ export default function App() {
                   );
                 })}
 
-                {/* Lane labels */}
+                {/* Lane labels: top -> bottom = 2,1,0,-1,-2 */}
                 {Array.from({ length: GRID_H }).map((_, y) => {
                   const pos = posOf(-1, y);
                   return (
@@ -671,12 +833,12 @@ export default function App() {
                       key={`row-${y}`}
                       className="absolute text-slate-400 font-mono text-xs whitespace-nowrap z-10"
                       style={{
-                        left: pos.x - 10,
+                        left: pos.x - 18,
                         top: pos.y + 16,
                         transform: `rotate(${pos.rotate}deg)`,
                       }}
                     >
-                      Orb {y + 1}
+                      {orbitValueFromY(y)}
                     </div>
                   );
                 })}
@@ -707,19 +869,41 @@ export default function App() {
                   })
                 )}
 
-                {/* Evader A */}
-                <motion.div
-                  className="absolute w-11 h-11 flex items-center justify-center text-blue-400 z-30 drop-shadow-[0_0_10px_rgba(96,165,250,1)]"
-                  initial={false}
-                  animate={{
-                    left: posOf(aPos.x, aPos.y).x,
-                    top: posOf(aPos.x, aPos.y).y,
-                    rotate: posOf(aPos.x, aPos.y).rotate,
-                  }}
-                  transition={{ type: 'spring', stiffness: 100, damping: 14 }}
-                >
-                  <Satellite size={26} strokeWidth={1.5} />
-                </motion.div>
+                {/* Evader A: actual visible piece */}
+                {showActualBluePiece && (
+                  <motion.div
+                    className="absolute w-11 h-11 flex items-center justify-center text-blue-400 z-30 drop-shadow-[0_0_10px_rgba(96,165,250,1)]"
+                    initial={false}
+                    animate={{
+                      left: posOf(aPos.x, aPos.y).x,
+                      top: posOf(aPos.x, aPos.y).y,
+                      rotate: posOf(aPos.x, aPos.y).rotate,
+                    }}
+                    transition={{ type: 'spring', stiffness: 100, damping: 14 }}
+                  >
+                    <Satellite size={26} strokeWidth={1.5} />
+                  </motion.div>
+                )}
+
+                {/* Hidden-window marker for hidden-red view (shows only last observed location, not current) */}
+                {!showActualBluePiece && (
+                  <motion.div
+                    className="absolute w-11 h-11 flex items-center justify-center text-blue-300/40 z-[35]"
+                    initial={false}
+                    animate={{
+                      left: posOf(redObservedA.x, redObservedA.y).x,
+                      top: posOf(redObservedA.x, redObservedA.y).y,
+                      rotate: posOf(redObservedA.x, redObservedA.y).rotate,
+                    }}
+                    transition={{ type: 'spring', stiffness: 100, damping: 14 }}
+                  >
+                    <div className="absolute inset-0 rounded-full border border-dashed border-blue-300/30" />
+                    <Satellite size={24} strokeWidth={1.5} />
+                    <div className="absolute -top-2 -right-2 text-[10px] px-1 py-0.5 rounded bg-slate-900/80 border border-slate-700 text-blue-200">
+                      last
+                    </div>
+                  </motion.div>
+                )}
 
                 {/* Pursuer B */}
                 <motion.div
@@ -777,11 +961,52 @@ export default function App() {
                     )}
                   </div>
 
+                  {/* Red sensor info for the human red player */}
+                  {mode === 'ai' && humanRole === 'B' && currentPlayer === 'B' && (
+                    <div className="w-full max-w-xl rounded-xl border border-slate-700/60 bg-slate-900/50 px-4 py-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                        <div className="flex items-center gap-2">
+                          <Radar size={15} className="text-slate-300" />
+                          <span className="text-slate-300">Sensor Window</span>
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-xs border ${
+                              redVisionNow
+                                ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
+                                : 'border-amber-500/40 bg-amber-500/10 text-amber-200'
+                            }`}
+                          >
+                            {redVisionNow ? 'Visible (Exact Target)' : 'Hidden (No Exact Target)'}
+                          </span>
+                        </div>
+                        <span className="text-xs text-slate-400 font-mono">
+                          cycle-step {((turn - 1) % 4) + 1}/4
+                        </span>
+                      </div>
+
+                      {!redVisionNow && (
+                        <div className="mt-2 text-xs text-slate-300 flex items-center gap-2">
+                          <AlertTriangle
+                            size={14}
+                            className={hiddenContactSignal ? 'text-amber-300' : 'text-slate-500'}
+                          />
+                          {hiddenContactSignal ? (
+                            <span className="text-amber-200">
+                              Contact alert: target is inside your lock zone (position unknown).
+                            </span>
+                          ) : (
+                            <span className="text-slate-400">No contact alert this turn.</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   <div className="flex flex-wrap justify-center gap-3">
                     {[0, 1, 2, 3, 4].map((y) => {
                       const dx = y - 2;
                       const fromX = currentPlayer === 'A' ? aPos.x : bPos.x;
                       const valid = isValidMove(currentPlayer, fromX, y);
+                      const orbitVal = orbitValueFromY(y);
 
                       return (
                         <button
@@ -795,7 +1020,7 @@ export default function App() {
                           }`}
                         >
                           <div className="relative z-10 flex flex-col items-center gap-1">
-                            <span className="font-bold">Orb {y + 1}</span>
+                            <span className="font-bold">{orbitVal}</span>
                             <span
                               className={`text-xs px-2 py-0.5 rounded bg-slate-950/50 ${
                                 valid
@@ -917,13 +1142,57 @@ export default function App() {
               <div className="mt-4 p-3 rounded-xl border border-slate-800 bg-slate-950/50 text-xs text-slate-400 leading-5">
                 <p className="text-slate-300 font-semibold mb-1">Possible Extensions</p>
                 <p>
-                  Stronger AI, turn logs, replay, difficulty levels, stochastic disturbances, RL mode, etc.
+                  Stronger AI, turn logs, replay, difficulty levels, stochastic observation noise, RL
+                  mode, etc.
                 </p>
               </div>
             </div>
           </aside>
         </div>
       </div>
+
+      {/* Hotseat handoff screen protector (only used before hidden turns to prevent leak) */}
+      {hotseatHandoff && matchPhase === 'playing' && mode === 'hotseat' && (
+        <div className="fixed inset-0 z-[200] bg-slate-950/95 backdrop-blur-sm flex items-center justify-center p-4">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.96, y: 8 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            className="w-full max-w-lg rounded-3xl border border-slate-700 bg-slate-900/80 p-6 md:p-8 shadow-2xl text-center"
+          >
+            <div className="flex items-center justify-center gap-3 mb-4">
+              <Satellite className="text-blue-400" size={26} />
+              <Rocket className="text-red-400" size={26} />
+            </div>
+
+            <h3 className="text-2xl font-bold text-white mb-2">
+              Next Turn Ready Check
+            </h3>
+
+            <p className="text-slate-300 text-sm leading-6 mb-2">
+              Pass the device to the{' '}
+              <span
+                className={`font-semibold ${
+                  hotseatHandoff.nextPlayer === 'A' ? 'text-blue-300' : 'text-red-300'
+                }`}
+              >
+                {hotseatHandoff.nextPlayer === 'A' ? 'Blue (Evader)' : 'Red (Pursuer)'}
+              </span>{' '}
+              player.
+            </p>
+
+            <p className="text-slate-400 text-xs mb-5">
+              Turn {hotseatHandoff.nextTurn} · Hidden Window
+            </p>
+
+            <button
+              onClick={() => setHotseatHandoff(null)}
+              className="px-6 py-3 rounded-xl bg-white text-slate-900 font-bold hover:bg-blue-100 transition active:scale-95"
+            >
+              Ready
+            </button>
+          </motion.div>
+        </div>
+      )}
     </div>
   );
 }
