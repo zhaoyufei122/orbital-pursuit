@@ -838,7 +838,7 @@ if (mode === 'hotseat' && finishedTurnWasHidden) {
                         transform: `rotate(${pos.rotate}deg)`,
                       }}
                     >
-                      {orbitValueFromY(y)}
+                      {`Orb ${orbitValueFromY(y)}`}
                     </div>
                   );
                 })}
@@ -1020,7 +1020,7 @@ if (mode === 'hotseat' && finishedTurnWasHidden) {
                           }`}
                         >
                           <div className="relative z-10 flex flex-col items-center gap-1">
-                            <span className="font-bold">{orbitVal}</span>
+                            <span className="font-bold">{`Orb ${orbitVal}`}</span>
                             <span
                               className={`text-xs px-2 py-0.5 rounded bg-slate-950/50 ${
                                 valid
